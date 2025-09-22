@@ -1,0 +1,202 @@
+name: fullstack-launchpad
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: fullstack-launchpad-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-forge}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./ops/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: fullstack-launchpad-backend:dev
+    container_name: fullstack-launchpad-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: ./.env
+    environment:
+      # Ensure app code path is importable before site-packages
+      PYTHONPATH: /app
+      # Default bind host/port
+      UVICORN_HOST: 0.0.0.0
+      UVICORN_PORT: ${BACKEND_PORT:-8000}
+      CORS_ORIGINS: '["http://localhost:${FRONTEND_PORT:-5173}","http://localhost:${FRONTEND_TEST_PORT:-5180}"]'
+    # Dev stack: run migrations and start uvicorn with autoreload; compose watch keeps sources in sync.
+    command:
+      [
+        "sh",
+        "-lc",
+        "/app/.venv/bin/python -m alembic upgrade head && /app/.venv/bin/uvicorn app.main:app --reload --host 0.0.0.0 --port ${BACKEND_PORT:-8000}",
+      ]
+    working_dir: /app
+    ports:
+      - "${BACKEND_PORT:-8000}:${BACKEND_PORT:-8000}"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:${BACKEND_PORT}/api/healthz >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    develop:
+      watch:
+        # Sync Python sources without requiring rebuilds; uvicorn --reload handles reloads
+        - action: sync
+          path: ./backend/app
+          target: /app/app
+          ignore:
+            - "__pycache__/**"
+            - "**/*.pyc"
+        # Rebuild on dependency/lock changes
+        - action: rebuild
+          path: ./backend/pyproject.toml
+        - action: rebuild
+          path: ./backend/uv.lock
+    
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: development-dependencies-env
+      args:
+        VITE_API_BASE_URL: http://localhost:${BACKEND_PORT:-8000}/api
+    image: fullstack-launchpad-frontend:dev
+    container_name: fullstack-launchpad-frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    env_file: ./.env
+    environment:
+      # Ensure Vite/React Router dev binds to all interfaces
+      HOST: 0.0.0.0
+      PORT: ${FRONTEND_PORT:-5173}
+      # Dev proxy target so the FE in-container proxies to BE service
+      VITE_PROXY_TARGET: http://backend:${BACKEND_PORT:-8000}
+      VITE_TEST_USER_ID: ${VITE_TEST_USER_ID:-11111111-1111-1111-1111-111111111111}
+    # Use Vite dev server for HMR; compose watch mounts sources directly.
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "${FRONTEND_PORT:-5173}"]
+    working_dir: /app
+    ports:
+      - "${FRONTEND_PORT:-5173}:${FRONTEND_PORT:-5173}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:${FRONTEND_PORT}/ >/dev/null 2>&1 || curl -fsS http://localhost:${FRONTEND_PORT}/ >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    develop:
+      watch:
+        # Sync source and config for instant HMR
+        - action: sync
+          path: ./frontend/src
+          target: /app/src
+        - action: sync
+          path: ./frontend/vite.config.ts
+          target: /app/vite.config.ts
+        - action: sync
+          path: ./frontend/index.html
+          target: /app/index.html
+        # Rebuild image on dependency changes
+        - action: rebuild
+          path: ./frontend/package.json
+        - action: rebuild
+          path: ./frontend/package-lock.json
+    
+
+  # Test profile: isolated stack for E2E on host
+  postgres_test:
+    image: postgres:17
+    container_name: fullstack-launchpad-postgres-test
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_TEST_DB:-forge_test}
+    volumes:
+      - pgdata_test:/var/lib/postgresql/data
+      - ./ops/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    profiles: ["test"]
+
+  backend_test:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: fullstack-launchpad-backend:test
+    container_name: fullstack-launchpad-backend-test
+    depends_on:
+      postgres_test:
+        condition: service_healthy
+    env_file: ./.env
+    environment:
+      PYTHONPATH: /app
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres_test:5432/${POSTGRES_TEST_DB:-forge_test}
+      CORS_ORIGINS: '["http://localhost:${FRONTEND_PORT:-5173}","http://localhost:${FRONTEND_TEST_PORT:-5180}"]'
+    # Test profile stays on the Dockerfile's production command (no reload) so Playwright sees prod-like behaviour.
+    command:
+      [
+        "sh",
+        "-lc",
+        "/app/.venv/bin/python -m alembic upgrade head && /app/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port ${BACKEND_TEST_PORT:-8001}",
+      ]
+    working_dir: /app
+    ports:
+      - "${BACKEND_TEST_PORT:-8001}:${BACKEND_TEST_PORT:-8001}"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:${BACKEND_TEST_PORT}/api/healthz >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    profiles: ["test"]
+
+  frontend_test:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: http://localhost:${BACKEND_TEST_PORT:-8001}/api
+    image: fullstack-launchpad-frontend:test
+    container_name: fullstack-launchpad-frontend-test
+    depends_on:
+      backend_test:
+        condition: service_healthy
+    env_file: ./.env
+    environment:
+      HOST: 0.0.0.0
+      PORT: ${FRONTEND_TEST_PORT:-5180}
+      FRONTEND_TEST_PORT: ${FRONTEND_TEST_PORT:-5180}
+      VITE_PROXY_TARGET: http://backend_test:${BACKEND_TEST_PORT:-8001}
+      VITE_TEST_USER_ID: ${VITE_TEST_USER_ID:-11111111-1111-1111-1111-111111111111}
+    working_dir: /app
+    ports:
+      - "${FRONTEND_TEST_PORT:-5180}:${FRONTEND_TEST_PORT:-5180}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:${FRONTEND_TEST_PORT}/ >/dev/null 2>&1 || curl -fsS http://localhost:${FRONTEND_TEST_PORT}/ >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    # Default Dockerfile command serves the prebuilt /dist bundle via npx serve.
+    profiles: ["test"]
+
+volumes:
+  pgdata:
+  pgdata_test:

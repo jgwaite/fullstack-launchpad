@@ -1,0 +1,65 @@
+# OS / Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+.history/
+.cache/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Node / Frontend
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+build/
+**/build/
+.react-router/
+frontend/.react-router/
+
+# Vite / Playwright
+**/test-results/
+**/playwright-report/
+**/playwright/.cache/
+
+# Python
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+backend/.venv/
+
+# Coverage
+.coverage
+.coverage.*
+htmlcov/
+coverage/
+.nyc_output/
+
+# Env files (keep examples)
+.env
+.env.*
+backend/.env
+frontend/.env.local
+!*.env.example
+!*.env.local.example
+
+# Docker / Podman (local)
+pgdata/
+**/pgdata/
